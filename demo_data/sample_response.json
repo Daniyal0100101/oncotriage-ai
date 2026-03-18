@@ -1,0 +1,10 @@
+{
+  "demo_variant": {
+    "ll_ref": -2.456,
+    "ll_alt": -4.891,
+    "delta_ll": -2.435,
+    "elapsed_ms_ref": 85,
+    "elapsed_ms_alt": 91,
+    "elapsed_ms_total": 176
+  }
+}
