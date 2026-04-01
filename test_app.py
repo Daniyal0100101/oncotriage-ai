@@ -223,10 +223,10 @@ class TestRiskHelpers:
         assert "HIGH" in risk_label(0.90)
 
     def test_benign_label(self):
-        assert "BENIGN" in risk_label(0.05).upper()
+        assert "MINIMAL" in risk_label(0.05).upper() or "LOW" in risk_label(0.05).upper()
 
     def test_uncertain_label(self):
-        assert "UNCERTAIN" in risk_label(0.50).upper() or "VUS" in risk_label(0.50)
+        assert "UNCERTAIN" in risk_label(0.50).upper()
 
     def test_colors(self):
         assert _risk_color(0.90) == "#e74c3c"

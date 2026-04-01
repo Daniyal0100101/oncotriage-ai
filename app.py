@@ -1,6 +1,7 @@
 """
 app.py — OncoTriage AI
-Production-ready Streamlit web application powered by NVIDIA NIM Evo 2.
+Research prototype Streamlit application powered by NVIDIA NIM Evo 2.
+Research use only. Outputs are not clinically validated.
 """
 
 import os
@@ -11,7 +12,10 @@ import traceback
 import pandas as pd
 import streamlit as st
 
-from model import Evo2Client, BRCAScorer, build_synthetic_training_data
+from model import (
+    Evo2Client, BRCAScorer, build_synthetic_training_data,
+    InferenceUnavailableError, _demo_score_result,
+)
 from utils import (
     parse_variant,
     validate_dna_sequence,
@@ -37,7 +41,7 @@ st.set_page_config(
     menu_items={
         "Get Help": "https://github.com/Daniyal0100101/oncotriage-ai",
         "Report a bug": "https://github.com/Daniyal0100101/oncotriage-ai/issues",
-        "About": "OncoTriage AI — Evo 2 powered variant pathogenicity scoring. Research use only.",
+        "About": "OncoTriage AI — Research-use hereditary cancer variant review copilot. Not for clinical use.",
     },
 )
 
@@ -175,9 +179,9 @@ with st.sidebar:
     st.divider()
     st.markdown("**About**")
     st.caption(
-        "OncoTriage AI uses Evo 2's forward pass to compute per-sequence "
-        "log-likelihoods for ref vs alt alleles. A lightweight RandomForest "
-        "head maps the Δlog-likelihood to a pathogenicity probability."
+        "OncoTriage AI uses Evo 2's /generate endpoint to derive per-sequence "
+        "log-likelihood proxies for ref vs alt alleles. A lightweight RandomForest "
+        "ranking head maps these features to a variant review priority score."
     )
     st.caption(
         "📄 [Evo 2 Nature paper](https://doi.org/10.1038/s41586-026-10176-5) · "
@@ -278,10 +282,14 @@ with tab_single:
                     brca_status = summarize_known_variant_status(variant_input)
                 if brca_status["found"]:
                     st.success(f"**Found:** {brca_status['hgvs']}")
-                    st.write(f"**Known pathogenicity:** {brca_status['pathogenicity']}")
+                    st.write(f"**External DB classification:** {brca_status['pathogenicity']}")
                     st.caption("Source: BRCA Exchange (brcaexchange.org)")
                 else:
-                    st.info("Variant not found in BRCA Exchange — may be novel.")
+                    st.info(
+                        "ℹ️ **Not found in BRCA Exchange** — this variant is not in the "
+                        "database (may be novel or unlisted). This is a **database lookup "
+                        "result only** and does not indicate any Evo 2 scoring failure."
+                    )
 
     with col_right:
         st.markdown("### Results")
@@ -312,13 +320,11 @@ with tab_single:
 
             # ── Score ─────────────────────────────────────────────────────────
             try:
-                with st.spinner("🧠 Running Evo 2 forward pass for REF sequence…"):
+                with st.spinner("🧠 Preparing sequences…"):
                     ref_ctx, alt_ctx = apply_variant_to_sequence(
                         sequence, parsed, context_window
                     )
-                    client = Evo2Client(
-                        st.session_state.api_key,
-                    )
+                    client = Evo2Client(st.session_state.api_key)
                     # Patch model if user chose 7b
                     if model_size == "evo2-7b":
                         import model as _m
@@ -327,8 +333,30 @@ with tab_single:
                         _m.GENERATE_ENDPOINT = f"{_m.NIM_BASE_URL}/biology/arc/evo2-7b/generate"
                         client = Evo2Client(st.session_state.api_key)
 
-                with st.spinner("🧠 Running Evo 2 forward pass for ALT sequence…"):
-                    score_result = client.score_variant(ref_ctx, alt_ctx)
+                is_demo = not bool(st.session_state.api_key)
+                fallback_occurred = False
+
+                with st.spinner("🧠 Running Evo 2 variant scoring…"):
+                    try:
+                        score_result = client.score_variant(ref_ctx, alt_ctx)
+                        is_demo = is_demo or score_result.get("demo_mode", False)
+                    except InferenceUnavailableError as api_err:
+                        st.warning(
+                            "⚠️ **Live Evo 2 inference is temporarily unavailable** — "
+                            "the NVIDIA API returned an internal error. "
+                            "Results below are **demo-mode estimates only** and do not "
+                            "reflect real model outputs.\n\n"
+                            f"*Technical detail:* `{api_err}`"
+                        )
+                        score_result = _demo_score_result()
+                        is_demo = True
+                        fallback_occurred = True
+
+                if is_demo and st.session_state.api_key:
+                    st.info(
+                        "🔬 **Demo-mode estimates** — values generated from a calibrated "
+                        "random distribution; **not** live Evo 2 predictions."
+                    )
 
                 delta_ll = score_result["delta_ll"]
                 annotation = annotate_variant(parsed, ref_ctx)
@@ -353,14 +381,18 @@ with tab_single:
                     "classification": risk_label(risk),
                     "annotation": annotation,
                     "elapsed_ms": score_result["elapsed_ms_total"],
+                    "inference_mode": "DEMO" if is_demo else "LIVE",
+                    "scoring_path": "demo" if is_demo else "generate-proxy",
+                    "model": model_size,
+                    "fallback_occurred": fallback_occurred,
                 }
                 st.session_state.results.append(result_record)
                 st.session_state.last_score = result_record
 
-            except RuntimeError as e:
+            except (InferenceUnavailableError, RuntimeError) as e:
                 st.error(str(e))
                 st.stop()
-            except Exception as e:
+            except Exception:
                 st.error(f"Unexpected error:\n\n```\n{traceback.format_exc()}\n```")
                 st.stop()
 
@@ -368,19 +400,26 @@ with tab_single:
         if st.session_state.last_score:
             r = st.session_state.last_score
             st.plotly_chart(make_risk_gauge(r["risk_score"]),
-                            use_container_width=True, config={"displayModeBar": False})
+                            width="stretch", config={"displayModeBar": False})
 
             col_m1, col_m2, col_m3 = st.columns(3)
             with col_m1:
                 st.metric("Δ Log-Likelihood", f"{r['delta_ll']:+.4f}",
                           help="Negative = damaging (alt less likely than ref under Evo 2).")
             with col_m2:
-                st.metric("Risk Score", f"{r['risk_score']:.3f}")
+                st.metric("Review Priority", f"{r['risk_score']:.3f}")
             with col_m3:
                 st.metric("Elapsed", f"{r['elapsed_ms']} ms")
 
-            st.markdown(f"**Classification:** {r['classification']}")
+            if r.get("inference_mode") == "DEMO":
+                st.warning("🔬 These results are **demo-mode estimates** — not live Evo 2 predictions.")
+            st.markdown(f"**Review signal:** {r['classification']}")
             st.markdown(f"**Annotation:** {r['annotation']}")
+            st.caption(
+                f"Inference mode: **{r.get('inference_mode', 'LIVE')}** · "
+                f"Scoring path: {r.get('scoring_path', 'generate-proxy')} · "
+                f"Model: {r.get('model', 'evo2-40b')}"
+            )
 
     # ── Vizualisations below ──────────────────────────────────────────────────
     if st.session_state.last_score:
@@ -391,7 +430,7 @@ with tab_single:
         with viz_col1:
             st.plotly_chart(
                 make_impact_bar_chart(r["delta_ll"], r["risk_score"]),
-                use_container_width=True, config={"displayModeBar": False},
+                width="stretch", config={"displayModeBar": False},
             )
         with viz_col2:
             try:
@@ -409,11 +448,29 @@ with tab_single:
                     display_seq, pos_int,
                     r["ref_allele"], r["alt_allele"],
                 ),
-                use_container_width=True, config={"displayModeBar": False},
+                width="stretch", config={"displayModeBar": False},
             )
 
         with st.expander("📋 Full Result Details", expanded=False):
             st.json(r)
+
+        with st.expander("🔍 Result Provenance", expanded=False):
+            _mode = r.get("inference_mode", "LIVE")
+            _path = r.get("scoring_path", "generate-proxy")
+            _mdl  = r.get("model", "evo2-40b")
+            _live = "No" if _mode == "DEMO" else "Yes"
+            _fall = "Yes" if r.get("fallback_occurred", False) else "No"
+            st.markdown(
+                f"| Field | Value |\n"
+                f"|---|---|\n"
+                f"| Model | `{_mdl}` |\n"
+                f"| Inference path | `{_path}` |\n"
+                f"| Mode | `{_mode}` |\n"
+                f"| Live inference succeeded | `{_live}` |\n"
+                f"| Demo fallback occurred | `{_fall}` |\n"
+                f"| External lookup | See BRCA Exchange expander in input panel |"
+            )
+            st.caption("⚠️ Research-use variant review aid only — not a diagnostic tool.")
 
 
 # =============================================================================
@@ -526,7 +583,7 @@ with tab_batch:
 # =============================================================================
 
 with tab_generate:
-    st.markdown("### 🧬 Generate Similar Benign-like Variants")
+    st.markdown("### 🧬 Generate Sequence Continuations via Evo 2")
     st.markdown(
         "Use Evo 2's generative capability to create synthetic DNA continuations "
         "from a known benign context. Useful for exploring sequence space around "

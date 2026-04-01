@@ -1,20 +1,18 @@
 """
 model.py — OncoTriage AI
-NVIDIA NIM Evo 2 API client + ML scoring head.
+NVIDIA NIM Evo 2 API client and RandomForest ranking head.
+Research use only. Outputs are not clinically validated.
 """
 
 import os
 import io
 import base64
 import time
+import logging
 import numpy as np
 import requests
 from typing import Optional, Dict, List, Tuple
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
 import joblib
-import pickle
 
 # ── API configuration ─────────────────────────────────────────────────────────
 
@@ -28,6 +26,31 @@ SCORING_LAYERS = ["output_layer"]
 
 # Timeout in seconds
 REQUEST_TIMEOUT = 120
+
+# ── Feature flag ──────────────────────────────────────────────────────────────
+# The hosted Evo 2 API (health.api.nvidia.com) does NOT expose the /forward
+# logits endpoint — it raises "StripedHyena has no attribute output_layer".
+# Keep False for the hosted API; set True only for private NIM deployments.
+EVO2_USE_FORWARD_PASS = os.environ.get("EVO2_USE_FORWARD_PASS", "false").lower() == "true"
+
+# Patterns that identify an unsupported / internal-error API response
+_INTERNAL_ERROR_PATTERNS = [
+    "StripedHyena has no attribute",
+    "output_layer",
+    "has no attribute",
+    "Internal Server Error",
+    "AttributeError",
+]
+
+_log = logging.getLogger(__name__)
+
+
+# ── Custom exception ──────────────────────────────────────────────────────────
+
+class InferenceUnavailableError(RuntimeError):
+    """Raised when the live Evo 2 API returns an internal / unsupported error.
+    Callers should fall back to demo mode and surface a UI warning.
+    """
 
 
 # ── Evo 2 NIM Client ──────────────────────────────────────────────────────────
@@ -45,31 +68,58 @@ class Evo2Client:
         })
 
     def _post(self, url: str, payload: dict) -> dict:
-        """POST to endpoint with error handling."""
+        """POST with debug logging and robust internal-error detection."""
+        _log.debug("POST %s | payload keys: %s", url, list(payload.keys()))
         try:
             resp = self.session.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            return resp.json()
+            _log.debug("Response status: %s | snippet: %.200s", resp.status_code, resp.text)
+
+            if not resp.ok:
+                body_text = ""
+                try:
+                    body_text = resp.json().get("detail", resp.text[:400])
+                except Exception:
+                    body_text = resp.text[:400]
+
+                _log.warning("Non-200 from %s — %s: %.200s", url, resp.status_code, body_text)
+
+                if any(pat in body_text for pat in _INTERNAL_ERROR_PATTERNS):
+                    raise InferenceUnavailableError(
+                        f"Evo 2 API internal error (status {resp.status_code}): {body_text[:200]}"
+                    )
+                if resp.status_code == 401:
+                    raise RuntimeError("❌ Invalid API key. Please check your NVIDIA NIM key (nvapi-...).")
+                elif resp.status_code == 422:
+                    raise RuntimeError(f"❌ Invalid request payload: {body_text}")
+                elif resp.status_code == 429:
+                    raise RuntimeError("⚠️ Rate limit exceeded. Free tier allows limited API calls. Wait and retry.")
+                else:
+                    raise RuntimeError(f"API error {resp.status_code}: {body_text}")
+
+            try:
+                data = resp.json()
+            except Exception:
+                raise RuntimeError("Could not decode API response as JSON.")
+
+            # Detect internal errors embedded inside a 200 response body
+            error_field = str(data.get("error") or data.get("message") or "")
+            if error_field and any(pat in error_field for pat in _INTERNAL_ERROR_PATTERNS):
+                _log.warning("Internal error in 200 body: %.200s", error_field)
+                raise InferenceUnavailableError(
+                    f"Evo 2 API internal error in response body: {error_field[:200]}"
+                )
+
+            return data
+
         except requests.exceptions.Timeout:
             raise RuntimeError(
                 "⏱ Request timed out (>120s). The NIM API may be cold-starting or overloaded. "
                 "Try reducing sequence length or retry in a moment."
             )
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response else "?"
-            body = ""
-            try:
-                body = e.response.json().get("detail", e.response.text[:300])
-            except Exception:
-                pass
-            if status == 401:
-                raise RuntimeError("❌ Invalid API key. Please check your NVIDIA NIM key (nvapi-...).")
-            elif status == 422:
-                raise RuntimeError(f"❌ Invalid request payload: {body}")
-            elif status == 429:
-                raise RuntimeError("⚠️ Rate limit exceeded. Free tier allows limited API calls. Wait and retry.")
-            else:
-                raise RuntimeError(f"API error {status}: {body}")
+        except (InferenceUnavailableError, RuntimeError):
+            raise
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Network error contacting NVIDIA API: {e}")
 
     def forward(self, sequence: str,
                 output_layers: List[str] = None) -> Tuple[Optional[np.ndarray], float]:
@@ -125,25 +175,26 @@ class Evo2Client:
         """
         Compute Δlog-likelihood between ref and alt sequences.
         Higher negative delta → more damaging.
-        Returns dict with delta_ll, ll_ref, ll_alt, elapsed_ms_total.
+
+        Routing:
+          - No API key          → demo mode (clearly labeled).
+          - EVO2_USE_FORWARD_PASS=False (default) → /generate endpoint.
+          - EVO2_USE_FORWARD_PASS=True  → /forward endpoint (private NIM only).
+
+        Returns dict with delta_ll, ll_ref, ll_alt, elapsed_ms_total, demo_mode.
+        Raises InferenceUnavailableError on internal API failures so the caller
+        can fall back gracefully.
         """
         if not self.api_key:
-            # DEMO MODE
-            import random
-            time.sleep(0.5)
-            ll_ref = -2.0 - random.random()
-            delta_ll = -0.5 - random.random() * 2.5
-            ll_alt = ll_ref + delta_ll
-            return {
-                "ll_ref": ll_ref, "ll_alt": ll_alt, "delta_ll": delta_ll,
-                "elapsed_ms_ref": 120, "elapsed_ms_alt": 115, "elapsed_ms_total": 235
-            }
-            
-        t0 = time.time()
+            return _demo_score_result()
 
+        if not EVO2_USE_FORWARD_PASS:
+            return self._score_via_generate(ref_seq, alt_seq)
+
+        # ── Forward-pass path (private NIM deployments only) ──────────────────
+        t0 = time.time()
         logits_ref, ms_ref = self.forward(ref_seq)
         logits_alt, ms_alt = self.forward(alt_seq)
-
         elapsed_total = int((time.time() - t0) * 1000)
 
         if logits_ref is None or logits_alt is None:
@@ -157,13 +208,79 @@ class Evo2Client:
         delta_ll = ll_alt - ll_ref
 
         return {
-            "ll_ref": ll_ref,
-            "ll_alt": ll_alt,
-            "delta_ll": delta_ll,
-            "elapsed_ms_ref": ms_ref,
-            "elapsed_ms_alt": ms_alt,
-            "elapsed_ms_total": elapsed_total,
+            "ll_ref": ll_ref, "ll_alt": ll_alt, "delta_ll": delta_ll,
+            "elapsed_ms_ref": ms_ref, "elapsed_ms_alt": ms_alt,
+            "elapsed_ms_total": elapsed_total, "demo_mode": False,
         }
+
+    def _score_via_generate(self, ref_seq: str, alt_seq: str) -> Dict:
+        """
+        Derive a proxy Δlog-likelihood using the /generate endpoint.
+        Requests 1 token with enable_logits + enable_sampled_probs.
+        Raises InferenceUnavailableError if the endpoint is unsupported.
+        """
+        t0 = time.time()
+
+        def _make_payload(seq: str) -> dict:
+            return {
+                "sequence": seq.upper(),
+                "num_tokens": 1,
+                "top_k": 1,
+                "enable_logits": True,
+                "enable_sampled_probs": True,
+            }
+
+        ref_result = self._post(GENERATE_ENDPOINT, _make_payload(ref_seq))
+        alt_result = self._post(GENERATE_ENDPOINT, _make_payload(alt_seq))
+        elapsed_total = int((time.time() - t0) * 1000)
+
+        ll_ref = _extract_ll_from_generate(ref_result)
+        ll_alt = _extract_ll_from_generate(alt_result)
+        delta_ll = ll_alt - ll_ref
+
+        return {
+            "ll_ref": ll_ref, "ll_alt": ll_alt, "delta_ll": delta_ll,
+            "elapsed_ms_ref": 0, "elapsed_ms_alt": 0,
+            "elapsed_ms_total": elapsed_total, "demo_mode": False,
+        }
+
+
+# ── Demo fallback + generate LL extraction ───────────────────────────────────
+
+def _demo_score_result() -> Dict:
+    """Return a clearly-labeled demo-mode score dict. No live API call made."""
+    import random
+    time.sleep(0.5)
+    ll_ref = -2.0 - random.random()
+    delta_ll = -0.5 - random.random() * 2.5
+    ll_alt = ll_ref + delta_ll
+    return {
+        "ll_ref": ll_ref, "ll_alt": ll_alt, "delta_ll": delta_ll,
+        "elapsed_ms_ref": 120, "elapsed_ms_alt": 115, "elapsed_ms_total": 235,
+        "demo_mode": True,
+    }
+
+
+def _extract_ll_from_generate(gen_result: dict) -> float:
+    """
+    Extract a log-likelihood proxy from a /generate response dict.
+    Prefers sampled_probs; falls back to logits blob; else returns neutral -2.0.
+    """
+    import math
+    sampled = gen_result.get("sampled_probs")
+    if sampled and isinstance(sampled, list):
+        log_probs = [math.log(max(float(p), 1e-12)) for p in sampled if p is not None]
+        if log_probs:
+            return float(sum(log_probs) / len(log_probs))
+
+    logits_b64 = gen_result.get("logits")
+    if logits_b64:
+        arr = _decode_npz(logits_b64)
+        if arr is not None:
+            seq = gen_result.get("sequence", "A")
+            return _compute_ll(arr, seq)
+
+    return -2.0
 
 
 # ── Logit decoding ────────────────────────────────────────────────────────────
@@ -180,7 +297,7 @@ def _decode_npz(b64_data: str) -> Optional[np.ndarray]:
         if arr.ndim == 3:
             arr = arr[:, 0, :]  # take batch 0
         return arr
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -217,7 +334,7 @@ class BRCAScorer:
     """
 
     def __init__(self):
-        self.model: Optional[Pipeline] = None
+        self.model: Optional[object] = None
         self._try_load()
 
     def _try_load(self):
@@ -258,7 +375,8 @@ class BRCAScorer:
                      ref_seq: str = "", alt_seq: str = "",
                      annotation: str = "") -> float:
         """
-        Predict pathogenicity risk score in [0, 1].
+        Compute a variant review priority score in [0, 1].
+        Higher score = higher review priority signal (not a clinical diagnosis).
         Uses trained RF model if available, otherwise a calibrated heuristic.
         """
         if self.model is not None:
@@ -328,8 +446,9 @@ class BRCAScorer:
 
 def _heuristic_risk(delta_ll: float, annotation: str = "") -> float:
     """
-    Map Δlog-likelihood to a risk score via a sigmoid-like calibration.
-    Validated against ClinVar: most pathogenic variants cluster at Δ < -1.0.
+    Map Δlog-likelihood to a review priority score via a sigmoid-like calibration.
+    Empirical observation: higher-impact variants tend to cluster at Δ < -1.0.
+    This is a heuristic approximation, not a validated clinical classifier.
     """
     # Splice/stop override
     if "splice" in annotation.lower():
@@ -350,9 +469,13 @@ def _heuristic_risk(delta_ll: float, annotation: str = "") -> float:
 def build_synthetic_training_data(n_pathogenic: int = 200,
                                    n_benign: int = 200) -> List[Dict]:
     """
-    Build a synthetic training set for demo / offline use.
-    Real data should be fetched via clinvar_data.py.
-    In production, replace with actual ClinVar Evo 2 scored variants.
+    Build a SYNTHETIC training set for offline / demo use only.
+
+    WARNING: This function generates simulated data from statistical distributions.
+    It does NOT use real ClinVar records or real Evo 2 scores.
+    The RF ranking head trained on this data is NOT scientifically validated.
+    Replace with real ClinVar-derived Evo 2 scores before any research claims.
+    Real data can be fetched via clinvar_data.py.
     """
     rng = np.random.default_rng(42)
     data = []

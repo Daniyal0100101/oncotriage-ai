@@ -265,7 +265,7 @@ def make_impact_bar_chart(delta_ll: float, risk_score: float) -> go.Figure:
         ))
 
     fig.update_layout(
-        xaxis=dict(range=[0, 1.15], title="Score (0 = benign, 1 = pathogenic)"),
+        xaxis=dict(range=[0, 1.15], title="Score (0 = lower priority, 1 = higher priority)"),
         yaxis_title="",
         height=200,
         margin=dict(l=20, r=40, t=30, b=20),
@@ -347,7 +347,7 @@ def make_risk_gauge(risk_score: float) -> go.Figure:
         mode="gauge+number+delta",
         value=round(risk_score * 100, 1),
         number={"suffix": "%", "font": {"size": 36}},
-        title={"text": f"Pathogenicity Risk<br><b>{label}</b>", "font": {"size": 14}},
+        title={"text": f"Review Priority Score<br><b>{label}</b>", "font": {"size": 14}},
         gauge={
             "axis": {"range": [0, 100], "tickcolor": "#aaa"},
             "bar": {"color": color},
@@ -382,15 +382,16 @@ def _risk_color(score: float) -> str:
 
 
 def risk_label(score: float) -> str:
+    """Return a review-priority label. These are triage signals only — not diagnostic classifications."""
     if score >= 0.80:
-        return "HIGH RISK — Likely Pathogenic"
+        return "HIGH PRIORITY — Warrants Immediate Review"
     elif score >= 0.66:
-        return "ELEVATED RISK — Possibly Pathogenic"
+        return "ELEVATED PRIORITY — Review Recommended"
     elif score >= 0.33:
-        return "UNCERTAIN — VUS"
+        return "UNCERTAIN — Inconclusive Signal"
     elif score >= 0.20:
-        return "LOW RISK — Likely Benign"
-    return "BENIGN"
+        return "LOW PRIORITY — Lower Review Signal"
+    return "MINIMAL SIGNAL"
 
 
 # ── CSV export ────────────────────────────────────────────────────────────────
