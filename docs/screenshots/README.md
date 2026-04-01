@@ -6,18 +6,15 @@ This directory contains the screenshot checklist for the live application assets
 
 ---
 
-## Required Screenshots
+## Release Screenshots
 
 | Filename | What to Capture |
 |---|---|
-| `01_home_screen.png` | The landing state of the app - hero title, disclaimer box, empty Single Variant tab, sidebar with model settings |
-| `02_single_variant_scored.png` | A complete scored result - risk gauge, metrics row (Delta LL, Review Priority, Elapsed), review signal label, annotation, provenance expander open |
-| `03_brca_lookup.png` | The BRCA Exchange Database Lookup expander open with a real or demo result |
-| `04_batch_scoring.png` | Batch tab with a results table displayed after scoring a sample CSV |
-| `05_generate_tab.png` | Generate tab with a seed sequence and the generated output visible |
-| `06_clinvar_explorer.png` | ClinVar Explorer tab showing a fetched variant table |
-| `07_demo_mode_banner.png` | Demo mode active - the yellow warning banner at the top of the screen |
-| `08_live_fallback_warning.png` | The orange fallback warning that appears when live inference is unavailable |
+| `home.png` | Landing state of the app with the sidebar visible |
+| `single-variant.png` | Single-variant LIVE result with review-priority visualization, metrics, and annotation |
+| `batch.png` | Batch scoring tab with uploaded CSV workflow visible |
+| `generate.png` | Generate tab with generated output shown |
+| `07_demo_mode_banner.png` | Demo mode banner reference image kept from earlier documentation work |
 
 ---
 
@@ -33,17 +30,14 @@ This directory contains the screenshot checklist for the live application assets
 
 ## Embedding in README
 
-The `## Screenshots` section in `README.md` should stay aligned with this checklist:
+The `## Screenshots` section in `README.md` should stay aligned with these release assets:
 
 ```markdown
 ## Screenshots
 
-![Home screen](docs/screenshots/01_home_screen.png)
-*Home screen - demo mode active, no API key required*
+![Home](docs/screenshots/home.png)
 
-![Scored result](docs/screenshots/02_single_variant_scored.png)
-*Single variant scored - review priority gauge and provenance metadata*
+![Single Variant Review](docs/screenshots/single-variant.png)
 
-![Batch scoring](docs/screenshots/04_batch_scoring.png)
-*Batch scoring results table with CSV download*
+![Batch Scoring](docs/screenshots/batch.png)
 ```
