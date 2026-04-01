@@ -43,7 +43,7 @@ Genomic sequences entered into this application are processed in-memory and sent
 ## Dependency Security
 
 - Dependencies are listed in `requirements.txt`. Pin versions before any production or institutional deployment.
-- Run `pip audit` or `safety check` periodically to detect known vulnerabilities in dependencies.
+- Run `pip-audit` or `safety check` periodically to detect known vulnerabilities in dependencies.
 
 ---
 

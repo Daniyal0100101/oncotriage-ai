@@ -27,7 +27,9 @@ from utils import (
 from model import (
     _decode_npz,
     _compute_ll,
+    _extract_ll_from_generate,
     _heuristic_risk,
+    _sanitize_response_snippet,
     BRCAScorer,
     build_synthetic_training_data,
 )
@@ -193,6 +195,29 @@ class TestLogLikelihood:
         logits = self._make_logits(5, "A")
         ll = compute_sequence_log_likelihood(logits, "")
         assert ll == 0.0
+
+    def test_extract_ll_from_generate_invalid_sequence_returns_neutral(self):
+        import io
+        import base64
+
+        arr = self._make_logits(3, "A")
+        buf = io.BytesIO()
+        np.savez(buf, output_layer=arr)
+        logits_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        assert _extract_ll_from_generate({"logits": logits_b64}) == -2.0
+        assert _extract_ll_from_generate({"logits": logits_b64, "sequence": "A"}) == -2.0
+
+    def test_sanitize_response_snippet_redacts_sensitive_values(self):
+        text = (
+            "Authorization: Bearer abc123 nvapi-secret-token "
+            "path=C:\\Users\\name\\secret.txt sequence=ACGTACGTACGTACGTACGT"
+        )
+        sanitized = _sanitize_response_snippet(text)
+        assert "abc123" not in sanitized
+        assert "nvapi-secret-token" not in sanitized
+        assert "secret.txt" not in sanitized
+        assert "ACGTACGTACGTACGTACGT" not in sanitized
 
 
 # ── Heuristic risk scoring ────────────────────────────────────────────────────

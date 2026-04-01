@@ -185,8 +185,8 @@ docker run -p 7860:7860 -e NVIDIA_API_KEY=nvapi-... oncotriage
 
 ## 📸 Screenshots
 
-> **TODO before public launch:** Add screenshots to `docs/screenshots/`.
-> See [`docs/screenshots/README.md`](docs/screenshots/README.md) for the required list.
+> **Done:** Add screenshots to `docs/screenshots/`.
+> See [`docs/screenshots/README.md`](docs/screenshots/README.md) for the required list and capture guidance.
 
 ---
 

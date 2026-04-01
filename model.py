@@ -6,6 +6,7 @@ Research use only. Outputs are not clinically validated.
 
 import os
 import io
+import re
 import base64
 import time
 import logging
@@ -36,13 +37,20 @@ EVO2_USE_FORWARD_PASS = os.environ.get("EVO2_USE_FORWARD_PASS", "false").lower()
 # Patterns that identify an unsupported / internal-error API response
 _INTERNAL_ERROR_PATTERNS = [
     "StripedHyena has no attribute",
-    "output_layer",
     "has no attribute",
     "Internal Server Error",
     "AttributeError",
 ]
 
 _log = logging.getLogger(__name__)
+
+_REDACTION_PATTERNS = [
+    (r"(nvapi-[A-Za-z0-9_\-]+)", "[REDACTED_API_KEY]"),
+    (r"(?i)\b(api[_-]?key|token|secret)\b\s*[:=]\s*['\"]?[^'\",\\s]+", r"\1=[REDACTED]"),
+    (r"(?i)(bearer\s+)[A-Za-z0-9._\-]+", r"\1[REDACTED]"),
+    (r"(?i)([A-Z]:\\|/)[^\\/\r\n\t]+(?:[\\/][^\\/\r\n\t]+)+", "[REDACTED_PATH]"),
+    (r"\b[ACGT]{20,}\b", "[REDACTED_SEQUENCE]"),
+]
 
 
 # ── Custom exception ──────────────────────────────────────────────────────────
@@ -72,7 +80,11 @@ class Evo2Client:
         _log.debug("POST %s | payload keys: %s", url, list(payload.keys()))
         try:
             resp = self.session.post(url, json=payload, timeout=REQUEST_TIMEOUT)
-            _log.debug("Response status: %s | snippet: %.200s", resp.status_code, resp.text)
+            _log.debug(
+                "Response status: %s | snippet: %s",
+                resp.status_code,
+                _sanitize_response_snippet(resp.text),
+            )
 
             if not resp.ok:
                 body_text = ""
@@ -277,10 +289,27 @@ def _extract_ll_from_generate(gen_result: dict) -> float:
     if logits_b64:
         arr = _decode_npz(logits_b64)
         if arr is not None:
-            seq = gen_result.get("sequence", "A")
+            seq = gen_result.get("sequence")
+            if not isinstance(seq, str) or not seq:
+                return -2.0
+            expected_tokens = int(arr.shape[0]) if getattr(arr, "ndim", 0) >= 1 else 0
+            if expected_tokens <= 0 or len(seq) != expected_tokens:
+                return -2.0
             return _compute_ll(arr, seq)
 
     return -2.0
+
+
+def _sanitize_response_snippet(text: Optional[str], limit: int = 100) -> str:
+    """Redact sensitive fields from API responses before debug logging."""
+    if not text:
+        return ""
+
+    sanitized = str(text).replace("\r", " ").replace("\n", " ")
+    for pattern, replacement in _REDACTION_PATTERNS:
+        sanitized = re.sub(pattern, replacement, sanitized)
+    sanitized = " ".join(sanitized.split())
+    return sanitized[:limit]
 
 
 # ── Logit decoding ────────────────────────────────────────────────────────────

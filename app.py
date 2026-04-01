@@ -400,7 +400,7 @@ with tab_single:
         if st.session_state.last_score:
             r = st.session_state.last_score
             st.plotly_chart(make_risk_gauge(r["risk_score"]),
-                            width="stretch", config={"displayModeBar": False})
+                            use_container_width=True, config={"displayModeBar": False})
 
             col_m1, col_m2, col_m3 = st.columns(3)
             with col_m1:
