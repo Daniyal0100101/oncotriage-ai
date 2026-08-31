@@ -172,7 +172,7 @@ class Evo2Client:
             time.sleep(1.0)
             mock_seq = "".join(random.choices("ACGT", k=num_tokens))
             return {"sequence": mock_seq, "elapsed_ms": 450}
-            
+
         payload = {
             "sequence": sequence.upper(),
             "num_tokens": num_tokens,
@@ -421,7 +421,7 @@ class BRCAScorer:
         # Empirically, most pathogenic BRCA variants have Δ < -0.5.
         return _heuristic_risk(delta_ll, annotation)
 
-    def train_on_clinvar(self, training_data: List[Dict]) -> Dict:
+    def train_on_clinvar(self, training_data: List[Dict], persist: bool = True) -> Dict:
         """
         Train the RandomForest on ClinVar features.
         training_data: list of {"delta_ll", "ll_ref", "ll_alt",
@@ -461,7 +461,8 @@ class BRCAScorer:
         cv_scores = cross_val_score(pipeline, X, y, cv=5, scoring="roc_auc")
         pipeline.fit(X, y)
 
-        joblib.dump(pipeline, ML_MODEL_PATH)
+        if persist:
+            joblib.dump(pipeline, ML_MODEL_PATH)
         self.model = pipeline
 
         return {

@@ -7,8 +7,10 @@ Run: python -m pytest test_app.py -v
 
 import sys
 import os
+import warnings
 import numpy as np
 import pytest
+from sklearn.exceptions import InconsistentVersionWarning
 
 # Ensure project root is on path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -271,14 +273,14 @@ class TestBRCAScorer:
     def test_train_synthetic(self):
         scorer = BRCAScorer()
         data = build_synthetic_training_data(50, 50)
-        metrics = scorer.train_on_clinvar(data)
+        metrics = scorer.train_on_clinvar(data, persist=False)
         assert "auc_cv_mean" in metrics
         assert metrics["auc_cv_mean"] > 0.5, "AUC should be above random chance"
 
     def test_trained_model_predicts(self):
         scorer = BRCAScorer()
         data = build_synthetic_training_data(100, 100)
-        scorer.train_on_clinvar(data)
+        scorer.train_on_clinvar(data, persist=False)
         # High-delta variant should score higher risk
         risk_high = scorer.predict_risk(-3.0, -2.0, -5.0)
         risk_low = scorer.predict_risk(1.0, -1.5, -0.5)
@@ -291,6 +293,17 @@ class TestBRCAScorer:
         scorer = BRCAScorer()
         feats = scorer.get_features(-1.0, -2.0, -3.0, "ATCG", "TTCG")
         assert feats.shape == (1, 13)
+
+    def test_persisted_model_loads_without_version_warning_and_predicts(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", InconsistentVersionWarning)
+            scorer = BRCAScorer()
+
+        assert scorer.model is not None
+        features = scorer.get_features(-1.2, -2.0, -3.2, "ATCG", "TTCG")
+        direct = float(scorer.model.predict_proba(features)[0, 1])
+        actual = scorer.predict_risk(-1.2, -2.0, -3.2, "ATCG", "TTCG")
+        assert actual == pytest.approx(direct)
 
 
 # ── Synthetic training data ───────────────────────────────────────────────────
